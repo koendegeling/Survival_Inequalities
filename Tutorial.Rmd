@@ -1,0 +1,235 @@
+---
+title: 'Tutorial: Quantifying Survival Inequalities in Oncology Using '
+output:
+  html_document:
+    df_print: paged
+  html_notebook: default
+---
+
+# Step 1: survival data generation
+
+The first step is to generate or replicated individual-patient survival data from the published Kaplan-Meier curves and any additional aggregate data, such as the number at risk at different points in time. This can be done using the method by Guyot et al. (2012, <https://doi.org/10.1186/1471-2288-12-9>), for example, or another method.
+
+We do not illustrate the process for replicating individual patient data (IPD) from Kaplan-Meier curves and associated data here, as it depends on the method being used. The below code generates the data that is used in this tutorial for illustration purposes. It simulates data for two treatment arms: Control (0) and Intervention (1). Survival times are simulated from treatment-specific Weibull distributions, with censoring simulated as independent exponential process such that approximately 30% of observations are censored.
+
+In this tutorial, the survival data are saved in the `df_IPD` data.frame, which has the following columns:
+
+-   **ID:** character providing a unique patient identifier
+
+-   **Arm:** character identifying the treatment (Comparator or Intervention)
+
+-   **Time:** numeric specifying the time at which the patient experienced the event or was censored
+
+-   **Event:** character specifying to what event the time recording in Time corresponds (Censored or Death)
+
+```{r Data Generation}
+
+# Random number seed for reproducibility
+set.seed(123)
+
+# Number of individuals for each treatment arm
+n0 <- 134
+n1 <- 173
+n  <- n0 + n1
+
+# Generate the population characteristics
+df_IPD <- data.frame(
+  ID  = paste0('Patient', 1:(n0+n1)),
+  Arm = c(rep('Comparator', n0), rep('Intervention', n1))
+)
+
+# Simulate the time to event and type of event
+event_time     <- ifelse(df_IPD$Arm == 'Comparator', rweibull(n, 3.5, 8), rweibull(n, 3, 10))
+censoring_time <- rexp(n, 0.05)
+
+# Approximately 30% censoring
+mean(censoring_time < event_time)
+
+# Add to dataset
+df_IPD$Time  <- ifelse(event_time < censoring_time, event_time, censoring_time)
+df_IPD$Event <- ifelse(event_time < censoring_time, 'Death', 'Censored')
+
+```
+
+# Step 2: survival modeling
+
+In most cases, it will be required or preferable to perform parametric survival modeling as second step. Here, this is illustrated for standard parametric distributions using the `flexsurv` package, but other packages or more flexible distributions can be used as well. For example, in the manuscript we additionally fit parametric mixture distributions.
+
+The code below illustrates how a Weibull distribution is fitted to the survival data for each treatment. The resulting distribution for the Comparator is saved in the `fit_comp` object, and that for the Intervention in the `fit_int` object. The fit of the distributions can be visualised easily as demonstrated in the code.
+
+Note that it is important not to model both treatments in one distribution using proportional hazards. Furthermore, for illustration purposes, we do not consider distributions other than the Weibull distribution, but in a real-world application you will need to determine which distribution provides the best fit to the data. Please refer to the Appendix of the corresponding manuscript for an example on the algorithm that was defined for our analysis, or to the broader literature on this topic.
+
+```{r Survival Modeling}
+
+# Loading the flexsurv package
+library(flexsurv)
+
+# Performing the survival modeling
+fit_comp <- flexsurvreg(formula = Surv(Time, Event == 'Death') ~ 1, data = df_IPD, subset = (df_IPD$Arm == 'Comparator'), dist = 'weibull')
+fit_int <- flexsurvreg(formula = Surv(Time, Event == 'Death') ~ 1, data = df_IPD, subset = (df_IPD$Arm == 'Intervention'), dist = 'weibull')
+
+# Inspecting the fits
+{
+  plot_times <- seq(0, 20, 0.1)
+  par(mfrow = c(1, 2))
+  plot(fit_comp, xlim = c(0, 20), t = plot_times, las = 1, main = 'Comparator', ylab = 'Survival', xlab = 'Time')
+  plot(fit_int, xlim = c(0, 20), t = plot_times, las = 1, main = 'Intervention', ylab = 'Survival', xlab = 'Time')
+}
+
+```
+
+# Step 3: obtaining the health distribution
+
+The third step is to obtain the health distribution by dividing survival into groups. In our analysis, we demonstrated results for both a 2-group and 5-group stratification. For the purposes of this tutorial, we illustrate the 5-group stratification only.
+
+Based on the number of groups, the percentiles that correspond to the middle of each group (i.e., median) need to be determined. In the code below this is illustrated using the `seq` function based on the number of groups specified in `n_groups`, and saved in the `p_groups` vector.
+
+Using the percentiles, the quantiles (i.e., survival times corresponding to the percentiles) can be obtained for each treatment arm. There are multiple ways to do this, but below code illustrates how it can be done using the `qweibull` function or the `predict` function using the fitted distributions saved in the `fit_comp` and `fit_int` objects. The quantiles represent the health distribution for each treatment separately and are saved in the `q_comp` and `q_int` vectors for the Comparator and Intervention, respectively.
+
+Lastly, you can create a barplot to visualise the health distribution, where each bar represents a group and the height of the bars represents the median survival rate.
+
+```{r Health Distribution}
+
+# Define the number of groups
+n_groups <- 5
+
+# Obtain the percentiles that correspond to the middle of each group
+p_groups <- seq(from = (1/n_groups)/2, by = 1/n_groups, length.out = n_groups)
+
+# Obtain the quantiles for each strategy (using the qweibull() function)
+# - Note that weibull parameters are estimated on log-scale in the flexsurv package
+q_comp <- qweibull(p = p_groups, shape = fit_comp$res['shape', 'est'], scale = fit_comp$res['scale', 'est'])
+q_int  <- qweibull(p = p_groups, shape = fit_int$res['shape', 'est'],  scale = fit_int$res['scale', 'est'])
+
+# Obtain the quantiles for each strategy (using the predict() function, which is agnostic to the type of distribution)
+# q_comp <- predict(object = fit_comp, type = 'quantile', p = p_groups)$.pred[[1]]$.pred_quantile
+# q_int  <- predict(object = fit_int,  type = 'quantile', p = p_groups)$.pred[[1]]$.pred_quantile
+
+# Visualization
+m_groups <- rbind(Comparator = q_comp, Intervention = q_int)
+
+par(mfrow = c(1,1))
+barplot(m_groups, beside = TRUE, names.arg = paste('Group', 1:n_groups), legend.text = TRUE, args.legend = list(x = 'top', bty = 'n', ncol =2), las = 1, ylab = 'Survival', main = 'Health Distribution (Survival)')
+
+```
+
+# Step 4: calculating the survival inequality
+
+The fourth step is to define the measure(s) of inequality. Here, we illustrate how the inequality can be defined by the absolute difference (AD) and inequality gradient (IG).
+
+Firstly, the AD between the highest and lowest groups for both treatment arms is calculated as the differences between the last and the first group in the health distribution. This is done using the `q_comp` and `q_int` vectors, and saved in the `AD_comp` and `AD_int` vectors.
+
+Secondly, to obtain the IG, a linear regression model is fitted to the quantiles/health distribution for each treatment. These models are saved in the `lm_comp` and `lm_int` in the code below. From these objects, the slope or coefficient of the group covariate can be obtained to define the IG. The resulting IGs are saved as `IG_comp` and `IG_int` for the comparator and intervention, respectively.
+
+For easy comparison, we summarize the results in a table saved in the `tbl_inequality` matrix.
+
+```{r Inequality}
+
+# Absolute difference (AD) between the highest and lowest group
+# - Illustrating two alternative ways of 
+AD_comp <- q_comp[n_groups] - q_comp[1]
+AD_int  <- q_int[n_groups] - q_int[1]
+
+# Inequality gradient (IG) based on linear regression model
+lm_comp <- lm(Survival ~ Group, data = data.frame(Group = 1:n_groups, Survival = q_comp))
+lm_int  <- lm(Survival ~ Group, data = data.frame(Group = 1:n_groups, Survival = q_int))
+
+IG_comp <- unname(coefficients(lm_comp)['Group'])
+IG_int  <- unname(coefficients(lm_int)['Group'])
+
+# Present results
+tbl_inequality <- rbind(
+  Comparator   = c('Absolute Difference' = AD_comp, 'Inequality Gradient' = IG_comp),
+  Intervention = c('Absolute Difference' = AD_int, 'Inequality Gradient' = IG_int)
+)
+
+tbl_inequality
+
+```
+
+# Step 5: calculating the impact of the intervention on the inequality
+
+The fifth step is to establish the impact of the intervention relative to the comparator by comparing the inequalities in the health distributions. The code below illustrates how this can be achieved based on the absolute and relative change in the AD and IG between the intervention and comparator arms.
+
+For easy comparison, the results are saved in `tbl_impact` matrix and printed together with the treatment-specific inequalities that were previously saved in the `tbl_inequality` matrix.
+
+```{r Impact}
+
+# Absolute and relative change in the absolute difference (AD)
+tbl_impact <- cbind(
+  'Absolute Difference' = c('Absolute Change' = AD_int - AD_comp, 'Relative Change' = (AD_int - AD_comp) / AD_comp),
+  'Inequality Gradient' = c('Absolute Change' = IG_int - IG_comp, 'Relative Change' = (IG_int - IG_comp) / IG_comp)
+)
+
+rbind(tbl_inequality, tbl_impact)
+
+```
+
+# Step 6: performing a probabilistic analysis
+
+After completing the deterministic analysis through Steps 1-5, it may be of interest to perform a probabilistic analysis to quantify the impact of parameter uncertainty on the outcomes. This can be done using a non-parametric bootstrapping approach or using multivariate normal distributions. Here it is ilustrated how it can be achieved using multivariate normal distributions by repeating the following process a sufficiently large number of times (i.e.,iterations) until a stable estimate is obtained:
+
+1.  Sample parameter values from the fitted survival models using the `mvrnorm` function from the `MASS` package and the estimated and variance-covariance matrix stored in the `fit_comp` and `fit_int` objects.
+2.  Obtain the quantiles (i.e., health distribution) for each treatment arm based on the sampled parameters, which is illustrated here using the `qweibull` function.
+3.  Calculate the inequality in the health distributions, which is illustrated here for the AD and IG.
+4.  Calculate the impact of the intervention on the inequality relative to the comparator, which is illustrated here in terms of absolute and relative difference.
+5.  Store the results to be returned/saved in a vector.
+
+In the code below, this process is implemented in a loop using the `sapply` function that nicely returns a matrix of the results per iteration. Alternatively, a for-loop could be implemented using the `for` function. The result of applying this is a (large) matrix with the results for each iteration. These values can then be summarised over all iterations, for example based on the mean and 95%-confidence interval for eacht outcome, as is illustrated below using the `apply` function.
+
+Given the simplicity of the analysis, it is unlikely that one will run into computational challenges. However, in case such challenges are experiences, for example when the data is boostrapped or when a very large number of iterations are performed, the probabilistic analysis can easily be run in parallel using the `parSapply` function (see the `parallel` package).
+
+```{r Probabilistic Analysis}
+
+# Load package to sample from multivariate normal distribution
+library(MASS)
+
+# Number of iterations / samples / runs
+n_runs <- 1000
+
+# Loop through iterations
+pa_out <- sapply(1:n_runs, function(i_run) {
+  
+  # Set seed for reproducibility
+  set.seed(i_run)
+  
+  # Sample coefficient values
+  coefs_comp <- mvrnorm(n = 1, mu = fit_comp$coefficients, Sigma = fit_comp$cov)
+  coefs_int  <- mvrnorm(n = 1, mu = fit_int$coefficients,  Sigma = fit_int$cov)
+  
+  # Transform into parameters, as flexsurv estimates Weibull paramters on log-scale
+  pars_comp <- exp(coefs_comp)
+  pars_int  <- exp(coefs_int)
+  
+  # Obtain quantiles (ie, health distributions)
+  q_comp <- qweibull(p = p_groups, shape = pars_comp['shape'], scale = pars_comp['scale'])
+  q_int  <- qweibull(p = p_groups, shape = pars_int['shape'], scale = pars_int['scale'])
+  
+  # Absolute difference (AD) between the highest and lowest group
+  AD_comp <- q_comp[n_groups] - q_comp[1]
+  AD_int  <- q_int[n_groups] - q_int[1]
+  
+  # Inequality gradient (IG) based on linear regression model
+  lm_comp <- lm(Survival ~ Group, data = data.frame(Group = 1:n_groups, Survival = q_comp))
+  lm_int  <- lm(Survival ~ Group, data = data.frame(Group = 1:n_groups, Survival = q_int))
+  
+  IG_comp <- unname(coefficients(lm_comp)['Group'])
+  IG_int  <- unname(coefficients(lm_int)['Group'])
+  
+  # Return results in vector
+  c(
+    AD_comp = AD_comp,
+    AD_int  = AD_int,
+    IG_comp = IG_comp,
+    IG_int  = IG_int,
+    AChange_AD = AD_int - AD_comp,
+    RChange_AD = (AD_int - AD_comp) / AD_comp,
+    AChange_IG = IG_int - IG_comp,
+    RChange_IG = (IG_int - IG_comp) / IG_comp
+  )
+  
+})
+
+# Summarize, for example by mean and 95%-confidence interval bounds
+apply(pa_out, 1, function(x) c(Mean = mean(x), LB = quantile(x, 0.025, names = F), UB = quantile(x, 0.975, names = F)))
+```
